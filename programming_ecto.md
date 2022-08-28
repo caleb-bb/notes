@@ -101,7 +101,30 @@ Since `Repo.insert` can take a schema struct as an argument, we can use it to in
 
 If there exists a one-to-many (that is, `has_many`) association from `Artist` to `Album` (with the corresponding `belongs_to`) then this command will insert an artist into the db, take its id, insert an album, and put the artist's id onto the album as a foreign key. This also works with deeply nested associations. If, for example, an `Album` were to have-many `Tracks`, we could nest the tracks inside of the album parent struct, like so: `%Album{tracksL {%Track{}, %Track{}}]}`
 
+## Making Multiple Changes With Transactions And Multi 
 
+### Transactions
+A transaction is meant to preserve database integrity. It does this by putting together a whole bunch of database operations as a unit, and then having them either succeed together or fail together. If any single transaction doesn't work, they all fail and none of them happen. So, for example, suppose I want to transfer ten dollars from my bank account to yours. In the transaction that occurs, my account has to go down by ten dollars, and yours must go up by ten. If either of these things do not happen, the whole deal is off.
 
-こんにちわ！
-$ \rightarrow $
+Different databases have different means of implementing transactions. As a general rule, you do the operations in the transaction one at a time, and if any of them fail, you execute a "rollback" and undo all of the operations up to the failed one.
+
+Ecto implements transactions via `Repo.transaction`. `Repo.transaction` can take one of two arguments, which can be a function or an `%Ecto.Multi{}` struct. The function executes db operations, while the `Ecto.Multi{}` struct contains a queue of operations to execute. 
+
+The big difference between `insert/1` and `insert!/1` is that the former returns an error tuple on failure and the latter raises. We use `insert!/1` when we're passing an anonymous function to `Repo.transaction` because `Repo.transaction` rolls back changes if and only if the function passed to it raises an error. This concerns only the case where `Repo.transaction` is passed a function. If we return an `:error` tuple, it will not roll back changes. 
+
+Functions provide a lot of, uh, functionality in this sense, because they let us build non-database functionality into our transactions. If, for example, we have an external search engine that we want to update as our database changes, transactions in Ecto can do that for us. However, there are two major problems. First, it's easy to get burnt, because we can easily break our db if we write our anonymous functions the wrong way. Second, anonymous functions are not composable.
+
+`Ecto.Multi` is here to help with all that. It's a data structure that holds database operations, and `Repo.transaction` is set up to handle `%Ecto.multi{}` structs. We define a multi struct by newing up an empty one with `Multi.new/0`. Once done, we can pipe that empty struct through any number of `Multi.insert(:table, thing)` statements, or use something besides insert if we want to do other things. This pipeline efines a multi that we can pass to `Repo.transaction`. For example,
+
+    artist = %Artist{name: "David Bowie"}
+    multi = 
+        Multi.new
+        |> Multi.insert(:artist, artist)
+        |> Multi.insert(:log, Log.changeset_for_insert(artist))
+    Repo.transaction(multi)
+    
+Notice how a pipeline of functions from `Multi` is used to define a struct that we can pass to `Repo.transaction/1`. The Ecto team recommends that we begin by newing up a Multi struct using `Multi.new` rather than trying to define the new struct directly, because `Multi.new` ensures that the new struct is correctly initialized. The `Multi` module has a number of functions that mirror the db operation functions in `Repo`, including `insert`, `update`, and `delete`, among others. We don't actually touch the database until we send the `%Multi{}` struct to `Repo.transaction/1`. When we do so, we get back an `:ok` tuple with a map. The keys of that map are the names we passed into the Multi statements (e.g. `:artist`, `:log`, etc). If the transaction fails when we pass a Multi struct, we get a nice 4-tuple with the changes that were attempted and rolled back, what kind of a failure it was, and what information caused the failure.  This tuple works very nicely when we feed it into a case statement, because we can pattern match and display error messages (potentially on forms) that say precisely what went wrong and where. The final value of the tuple will show all the changes that occurred up until the error. Diagnostically, this appears to be extremely valuable. If that map is empty, then none of the changes were applied. One reason this can happen is that Ecto will refuse to run the transaction at all if any of the changesets are invalid. This is why we must use changesets with multi, instead of just bare structs, whenever possible. 
+
+Keep in mind that multi can do non-db operations as well as transactions run with anon functions. `Multi.run/3` takes a multi struct for its first arg, the name of the current repo as an atom for its second arg and an anonymous function for its third, and that anon function can run whatever code we want. We can also use `Multi.run/5`, which takes a pre-existing multi struct, the name of the current repo, the module from which we want to call a function, the name of the function to be called, and a list of arguments, in that order. There is no `Multi.all` to mirror `Repo.all`, so we could use `Multi.run/5` to create such a function if we wished.
+
+`Multi` is still under construction and its API may still undergo major changes. Therefore, the safest way to introspect is to use `Multi.to_list(multi_struct)` in order to see all the operations queued therein.
