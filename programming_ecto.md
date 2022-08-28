@@ -30,8 +30,78 @@ Ecto has 15 types, which correspond to Elixir types. The Ecto types are on the l
 - :naive_datetime <-> NaiveDateTime 
 - :utc_datetime <-> DateTime
 
-The `map`
+The `map` type is dealt with differently by different databases. MySQL, for example, will store them as text fields, but Postgres has first-class support for JSON blobs and they are fully queryable. We like our maps to have string keys not atoms. When retrieving maps, Ecto always gives you back string keys. Ecto also provides an API to let us define custom types. 
+  
+Defining a query using a `select[...]` expression will return a struct of the appropriate type, but the struct fields will all be nil except those specified in the select statement.
+
+Schemas, generally speaking, are meant to return data in a shape you can re-use. If you're not returning data that is meant to be re-used in its present shape, then simply writing a query is better than creating a schema. If you've got a database for dogs, then the %Dog{} struct that lists age, weight, breed, and sex is one that you're going to use over and over again, and it makes sense to write a schema that pulls together a struct with that shape out of the database.
+
+### Associations
+A foreign key connects two relations at the database level. Associations are there to model the foreign-key connections between tables. Recall that a table is a relation. 
+
+Associations are things like has\_many, has\_one, and so on. When we write e.g. many\_to\_many, we are making a statement about the presence of foreign keys in a particular table or tables.
+
+When we specify an association on a schema, we are saying that that field on the schema will contain structs of the given type. So, suppose we have a `School` schema with many `Students`. When we say
+
+    has\_many :students, DB.School
+
+We are telling ecto that our `%School{}` schema will have a field called `students`, which will contain many `%Student{}` structs. This is where preloading comes in: since `students` is a different table from `school`, we don't want to step through and load all the students because we might not want a struct that big. Instead, we might see that the Ecto association has not been loaded when we retrieve a school. This is why we go through all the `Ecto.preload(thing)` rigmarole. There is a feature in some other technologies called "lazy loading", where, when we try to refer to a record, the system checks if that record is loaded, and if it's not, then it preloads it for us automatically. This sounds nice, but it triggers a crap-ton of SQL queries. DB access being a major performance bottleneck, we prefer to avoid this.
+
+In this case, `%School{}` is the parent record and the various instances of `%Student{}` are the child records. Ecto automatically generates the name of the foreign key using the name of the schema in which the association is defined. If this comes out incorrect for any reason, we can specify the foreign key manually in the schema definition, e.g. `has_many :things, DB.Thing, foreign_key: :weird_non_standard_id`.
+
+`belongs_to/3` is always the child side of the `has_*` associations. It is the one side of the many-to-one and the child side of the one-to-one. More precisely, at the db level, `belongs_to/3` goes on the schema modeling the table that has a foreign key. In this example, `belongs_to/3` would go onto the student table, because each student has the foreign key of a school in their table. 
+
+The `through: [...]` option of `has_many` takes a list of steps to get to the thing that the current schemas has many of. So if a school has many students has many classes, then we'd have something like `has_many :classes, through: [:students, :classes]`. It's like a trail of breadcrumbs to let the schema get things from another table. We ought to limit this to two or three levels. Now, `belongs_to` is not supported for nested associations. We can't create an association back from `:class` up to `:school`. We can, however, put a `many_to_many` association on both of them and use a join table. When we put a many-to-many association on two schemas that relate to one another, we use the `join_through:` option to feed that association a join table it can use. Because the join table is fed to both schemas on either side of the many-to-many association, we don't actually need a schema for the join table. It can live entirely in the background, and only manifest in our persistence framework as an argument to `join_through:`.
+
+When defining a query, we can use `assoc/2` to refer to an association defined in our schema. For example, if we have
+
+    query = from s in School,
+        join: c in assoc(s, :classes)
+        where c.name == "Science 101",
+        preload: [classes: c]
+
+And then run
+
+    query
+        |> Repo.all
+        
+We get a `%School{}` struct with `classes` preloaded. Because of the `has_many` association defined in the `School` schema, the resulting `%School{}` struct has a `classes` field. The line `join: c in assoc(s, classes)` performs a join on all classes associated with the school through its has-many association. Finally, the `preload: [classes: c]` tells Ecto to take c (which is all of the classes for the school) and load it as the value of the `classes` key in a list. 
+
+As far as I can tell, `assoc(binding, :entities)` looks at the association type that has been defined on the schema for the query in which it occurs and infers what it should do on that basis.
+
+### Embedded Schemas
+An embedded schema is a way of making sure that child records are always loaded alongside a parent record, with no need to preload. Basically, an embedded schema lets you take an entire record, convert it to a string or a JSON blob, and cram it all into one column in the parent table.
+
+Note that embedded schemas solve a similar problem to the one solved by join tables. In both cases, solving the problem without creating another table would require continuously adding new columns to a single table. The join table gets around this by having a table consisting only of pairs of foreign keys; the embedded schema gets around it by making the entire child record into a blob and putting it in one column. Join tables let us create many-to-many associations, while embedded schemas let us preload associated child records every time without the need to invoke `preload`. 
+
+### Deleting records using associations
+Some child associations want to persist after the deletion of their parents. Some should be deleted with their parents, by getting rid of the entire child record. And some should remain in place, but have their foreign keys set to `null`.
+
+Just as `has_many` has a `foreign_key:` option, it also has an `on_delete:` option. The three possible values for `on_delete` are:
+
+- `:nothing`, which does nothing. This is the default behavior.
+- `:nillify_all`, which goes through the child records and sets the foreign keys referring to their parents to `null`. They are thus no longer associated with any parent record.
+- `:delete_all` which goes through and wipes out all child records, deleting them entirely.
+
+Note that many databases, including postgres, allow for us to set behaviors on the db itself that specify this deletion behavior. If such behaviors exist on the database itself, then setting them in Ecto will have no effect. These behaviors can be set up in migrations when database tables are created. 
+
+### Seeding With Schemas
+Since `Repo.insert` can take a schema struct as an argument, we can use it to insert stuff into our db in order to seed. Importantly, we can also pass nested structs to `Repo.insert` that reflect our associations between tables, and `Repo` will happily create the correct records. For example, we can have:
+
+    Repo.insert(
+        %Artist{
+            name: "King Crimson",
+            albums: [
+                %Album{
+                    title: "In The Court Of The Crimson King"
+                }
+            ]
+        }
+    )
+
+If there exists a one-to-many (that is, `has_many`) association from `Artist` to `Album` (with the corresponding `belongs_to`) then this command will insert an artist into the db, take its id, insert an album, and put the artist's id onto the album as a foreign key. This also works with deeply nested associations. If, for example, an `Album` were to have-many `Tracks`, we could nest the tracks inside of the album parent struct, like so: `%Album{tracksL {%Track{}, %Track{}}]}`
+
 
 
 こんにちわ！
-$ \leftrightarrow $
+$ \rightarrow $
