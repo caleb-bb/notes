@@ -101,8 +101,6 @@ Since `Repo.insert` can take a schema struct as an argument, we can use it to in
 
 If there exists a one-to-many (that is, `has_many`) association from `Artist` to `Album` (with the corresponding `belongs_to`) then this command will insert an artist into the db, take its id, insert an album, and put the artist's id onto the album as a foreign key. This also works with deeply nested associations. If, for example, an `Album` were to have-many `Tracks`, we could nest the tracks inside of the album parent struct, like so: `%Album{tracksL {%Track{}, %Track{}}]}`
 
-## Making Multiple Changes With Transactions And Multi 
-
 ### Transactions
 A transaction is meant to preserve database integrity. It does this by putting together a whole bunch of database operations as a unit, and then having them either succeed together or fail together. If any single transaction doesn't work, they all fail and none of them happen. So, for example, suppose I want to transfer ten dollars from my bank account to yours. In the transaction that occurs, my account has to go down by ten dollars, and yours must go up by ten. If either of these things do not happen, the whole deal is off.
 
@@ -128,3 +126,12 @@ Notice how a pipeline of functions from `Multi` is used to define a struct that 
 Keep in mind that multi can do non-db operations as well as transactions run with anon functions. `Multi.run/3` takes a multi struct for its first arg, the name of the current repo as an atom for its second arg and an anonymous function for its third, and that anon function can run whatever code we want. We can also use `Multi.run/5`, which takes a pre-existing multi struct, the name of the current repo, the module from which we want to call a function, the name of the function to be called, and a list of arguments, in that order. There is no `Multi.all` to mirror `Repo.all`, so we could use `Multi.run/5` to create such a function if we wished.
 
 `Multi` is still under construction and its API may still undergo major changes. Therefore, the safest way to introspect is to use `Multi.to_list(multi_struct)` in order to see all the operations queued therein.
+
+## Migrations
+There are n main points here.
+
+1 - When a new table is created, the migration creates a primary key automatically, in a field called `id`. If you want to change the name or type of that field, then you want to set `primary_key: false` to `create table`, which prevents the creation of the id field. Then, if you so desire, you can add a field and set it as the primary key and give it whatever type you want. See the docs on `add field` for how to do this. Note that some tables, such as join tables, ought not to have a primary key at all. In that case, simply set the primary key to false in `create table` and then don't bother creating a primary key.
+
+2 - When Ecto runs migrations, it sets up your db. But when Ecto rolls migrations back, it has to infer how to undo those changes. In some cases, this is relatively simple: `create index` goes to `drop index` and `drop index` goes to `drop table`. However, certain actions, such as deleting a table column and moving it to another table, cannot be reversed because Ecto doesn't know what to replace the deleted table with. In these cases, we use the `up` and `down` functions to tell Ecto what to do in those specific cases. It's worthwhile to roll back our migrations before we push to source control just to confirm that Ecto can infer what it's supposed to do.
+
+3 - Migrations are run all at the same time. So, for example, if we create a table and then attempt to act on that table in the same migration, our migration will fail. This is because the table doesn't exist yet, and Ecto sees that our migration tries to act on a nonexistent table. The solution here is to create the table and then call `flush/0`. This function breaks the migration up into pieces that are executed sequentially; all code before a given `flush/0` call will be executed before the code that comes after. This lets us do cool stuff, like creating a table and then acting on it in the same migration.
